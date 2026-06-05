@@ -28,9 +28,9 @@ from typing import Dict, List, Optional, Tuple
 SILO_MANIFESTS: Dict[str, List[str]] = {
     "core_runtime": [
         "ledger", "dam", "reservoir", "reflect", "evolve", "rmpl", "auditor",
-        "dump.txt", "gumbo", "bridge", "tarpit", "silo", "governance",
+        "dump.txt", "z1", "bridge", "tarpit", "silo", "governance",
         "context packet", "compression", "journal", "log_event", "open_reservoir",
-        "rmpl_core", "gumbo_dam", "action_guard", "reservoir_gate",
+        "rmpl_core", "z1_dam", "action_guard", "reservoir_gate",
         "runtime_memory", "persist", "continuity", "provenance", "receipt_id",
         "ledger_ok", "ledger_failure", "stop_for_clarity", "block_destructive",
         "ingest_dump", "reflect_evolve", "kernel", "packet", "session_event",
@@ -45,7 +45,7 @@ SILO_MANIFESTS: Dict[str, List[str]] = {
         "zero-shot", "zero shot", "classification", "binary", "verdict",
         "rmpl_auditor", "dam_eval", "dam eval", "action_gate_eval", "action gate eval", "reflect_eval",
         "action gate", "deterministic stage", "action_gate_eval_results",
-        "gumbo_bridge", "sys.path", "import", "def ", "class ", "dataclass",
+        "z1_bridge", "sys.path", "import", "def ", "class ", "dataclass",
     ],
     "work_product": [
         "sbir", "grant", "complaint", "cftc", "azdes", "snap", "3cloud",

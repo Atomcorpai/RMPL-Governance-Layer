@@ -1,6 +1,6 @@
 """
-gumbo_reservoir_gate.py
-Cold-storage / reservoir access control for Gumbo.
+z1_reservoir_gate.py
+Cold-storage / reservoir access control for z1.
 
 Role:
     The ledger may point to cold storage, but the runtime must not automatically ingest it.

@@ -6,7 +6,7 @@ ANCHORS (never change):
 - invalid_json == deny + quarantine
 
 IDENTITY:
-- Stack: Gumbo / RMPL
+- Stack: z1 / RMPL
 - Roles: Auditor(3B) + Main(8B)
 - Constraint: consumer hardware, no hyperscaler dependency
 

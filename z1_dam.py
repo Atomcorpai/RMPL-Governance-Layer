@@ -1,6 +1,6 @@
 """
-gumbo_dam.py
-Coordinator / flow controller for the Gumbo dam layer.
+z1_dam.py
+Coordinator / flow controller for the z1 dam layer.
 
 Role:
     Orchestrates ledger, action guard, and reservoir gate.
@@ -24,7 +24,7 @@ from enum import Enum
 import re
 from typing import Any, Dict, List, Optional
 
-from gumbo_action_guard import ActionDecision, ActionGuard, GuardResult
+from z1_action_guard import ActionDecision, ActionGuard, GuardResult
 from rmpl_core import (
     LedgerFailureState,
     load_ledger,
@@ -34,12 +34,12 @@ from rmpl_core import (
 
 
 # ---------------------------------------------------------------------------
-# Thin adapter: maps gumbo_ledger-style class API onto rmpl_core functions
+# Thin adapter: maps z1_ledger-style class API onto rmpl_core functions
 # so the rest of this file needs no changes.
 # ---------------------------------------------------------------------------
 
 class LedgerStatus:
-    """Aliases onto LedgerFailureState values expected by GumboDam."""
+    """Aliases onto LedgerFailureState values expected by z1Dam."""
     OK = LedgerFailureState.AVAILABLE
     UNAVAILABLE = LedgerFailureState.UNAVAILABLE
     CORRUPTED = LedgerFailureState.CORRUPTED
@@ -82,7 +82,7 @@ class RuntimeLedger:
             return
         ledger.reject_path(path=action[:240], reason=reason)
         save_ledger(ledger, backup=False)
-from gumbo_reservoir_gate import ReservoirDecision, ReservoirGate, ReservoirGateResult
+from z1_reservoir_gate import ReservoirDecision, ReservoirGate, ReservoirGateResult
 
 
 class DamDecision(str, Enum):
@@ -128,7 +128,7 @@ def _looks_ambiguous(text: str) -> bool:
     return False
 
 
-class GumboDam:
+class z1Dam:
     def __init__(
         self,
         ledger: Optional[RuntimeLedger] = None,
@@ -247,7 +247,7 @@ class GumboDam:
         check = self.ledger.load()
         if check.status != LedgerStatus.OK:
             return (
-                f"GUMBO DAM STATUS: {check.status}. {check.message}\n"
+                f"z1 DAM STATUS: {check.status}. {check.message}\n"
                 "Use current-session facts only. Do not invent continuity. Stop before destructive or ambiguous actions."
             )
         ledger = check.ledger
@@ -256,7 +256,7 @@ class GumboDam:
         open_loops = getattr(ledger, "open_loops", [])[-5:]
         rejected = getattr(ledger, "rejected_paths", [])[-5:]
         return (
-            "GUMBO DAM STATUS: LEDGER_OK\n"
+            "z1 DAM STATUS: LEDGER_OK\n"
             f"Current task state: {task}\n"
             f"Safety rules: {rules}\n"
             f"Recent open loops: {open_loops}\n"

@@ -2,7 +2,7 @@
 Runtime Memory Persistence Ledger (RMPL)
 Version: 1.4
 Date: 2026-04-29
-System: Gumbo — Cognition Runtime Operating System
+System: z1 — Cognition Runtime Operating System
 
 Purpose:
     A small, authoritative continuity and provenance record for agent runtime governance.
@@ -35,7 +35,7 @@ import shutil
 
 
 RMPL_VERSION = "1.4"
-SYSTEM_NAME = "Gumbo"
+SYSTEM_NAME = "z1"
 SYSTEM_TYPE = "Cognition Runtime Operating System"
 
 DEFAULT_LEDGER_PATH = Path("runtime_memory_persistence_ledger.json")
@@ -436,7 +436,7 @@ def verify_packet(packet: Dict[str, Any], signature: str, key: bytes) -> bool:
 
 def create_initial_ledger() -> RuntimeMemoryPersistenceLedger:
     ledger = RuntimeMemoryPersistenceLedger()
-    ledger.current_task = "Build and validate RMPL as the core continuity/provenance component of Gumbo."
+    ledger.current_task = "Build and validate RMPL as the core continuity/provenance component of z1."
     for rule in CORE_RULES:
         ledger.add_rule(rule.name, rule.rule, rule.priority)
 

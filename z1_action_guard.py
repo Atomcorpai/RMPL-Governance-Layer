@@ -1,6 +1,6 @@
 """
-gumbo_action_guard.py
-Action-risk classifier for the Gumbo/RMPL dam layer.
+z1_action_guard.py
+Action-risk classifier for the z1/RMPL dam layer.
 
 Role:
     Classify user/runtime requests before execution.

@@ -6,7 +6,7 @@ durable event logging, and lossy compression of recent runtime text.
 
 Design goals:
 - One active logic file instead of split reflection/memory-loop drift.
-- No required external Gumbo imports.
+- No required external z1 imports.
 - Deterministic file-backed defaults.
 - Safe enough to run locally with plain Python.
 - Adapter-friendly: pass custom memory/journal objects if desired.
