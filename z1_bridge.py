@@ -7,11 +7,6 @@ Role:
     Routes content to correct silo via keyword router.
     Injects relevant silo context into model prompt.
     Surfaces audit flags to human. Never acts on them autonomously.
-
-Phase 2 (not yet released):
-    rmpl_audit_coordinator.py — silo-level auditor integration.
-    Audit endpoints below are stubbed and will return placeholder responses
-    until rmpl_audit_coordinator is wired in.
 """
 
 import os
@@ -23,8 +18,7 @@ from pathlib import Path
 
 from reflect_evolve_log_compress import reflect, evolve, log_event
 from rmpl_silo_router import route_and_write, load_context_for_mode
-
-# Phase 2: from rmpl_audit_coordinator import AuditCoordinator
+from rmpl_audit_coordinator import AuditCoordinator
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -42,18 +36,18 @@ MODE = os.environ.get("RMPL_MODE", "default")
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """
-You are a runtime governance assistant operating within the RMPL stack.
+You are a runtime governance assistant operating within the Z1 stack.
 Be direct and accurate. Do not invent continuity.
 Verify before claiming. Stop before guessing. Ask before acting on ambiguous instructions.
 Destructive or irreversible actions require explicit confirmation before execution.
 """
 
 # ---------------------------------------------------------------------------
-# App
-# Phase 2: coordinator = AuditCoordinator(base=SILO_BASE, model=AUDITOR_MODEL, ollama_url=OLLAMA_API_URL)
+# App and coordinator
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="z1 Local Server")
+app = FastAPI(title="Z1 Local Server")
+coordinator = AuditCoordinator(base=SILO_BASE, model=AUDITOR_MODEL, ollama_url=OLLAMA_API_URL)
 
 
 class ChatRequest(BaseModel):
@@ -101,32 +95,33 @@ async def status():
         files = []
     return {
         "status": "ONLINE",
-        "system": "z1",
+        "system": "Z1",
         "model": OLLAMA_MODEL,
         "auditor_model": AUDITOR_MODEL,
-        "auditor_status": "PHASE_2_PENDING",
         "mode": MODE,
         "silo_base": str(SILO_BASE),
+        "tarpit_status": coordinator.tarpit_status(),
         "files_loaded": files,
     }
 
 
 @app.get("/audit/flags")
 async def get_flags():
-    """Phase 2 stub. Returns empty until rmpl_audit_coordinator is wired in."""
-    return {"flag_count": 0, "flags": [], "status": "PHASE_2_PENDING"}
+    """Surface current audit flags to human. Read only."""
+    flags = coordinator.read_all_flags()
+    return {"flag_count": len(flags), "flags": flags}
 
 
 @app.get("/audit/tarpit")
 async def tarpit_status():
-    """Phase 2 stub."""
-    return {"tarpit_status": {}, "status": "PHASE_2_PENDING"}
+    return {"tarpit_status": coordinator.tarpit_status()}
 
 
 @app.post("/audit/release/{silo}")
 async def release_tarpit(silo: str, confirmed_by: str = "human"):
-    """Phase 2 stub."""
-    return {"released": None, "status": "PHASE_2_PENDING"}
+    """Human release only. Explicit endpoint required."""
+    coordinator.release_tarpit(silo, confirmed_by=confirmed_by)
+    return {"released": silo, "confirmed_by": confirmed_by}
 
 
 @app.get("/ls")
@@ -167,7 +162,8 @@ async def chat_endpoint(request: ChatRequest):
     # 5. Route response to silo too
     route_and_write(response_text, source="assistant", base=SILO_BASE)
 
-    # 6. Phase 2: audit_result = coordinator.audit_silo(routed_silo, incoming_content=request.prompt)
+    # 6. Trigger auditor for the silo that received content
+    audit_result = coordinator.audit_silo(routed_silo, incoming_content=request.prompt)
 
     # 7. Log event and evolve
     log_event(request.prompt, kind="user_input", mode=mode)
@@ -177,10 +173,10 @@ async def chat_endpoint(request: ChatRequest):
         "response": response_text,
         "routed_to": routed_silo,
         "audit": {
-            "status": "PHASE_2_PENDING",
-            "flag_count": 0,
-            "flags": [],
-            "tarpit_active": False,
+            "status": audit_result.get("status"),
+            "flag_count": audit_result.get("flag_count", 0),
+            "flags": audit_result.get("flags", []),
+            "tarpit_active": coordinator.tarpit_status().get(routed_silo, False),
         },
     }
 
