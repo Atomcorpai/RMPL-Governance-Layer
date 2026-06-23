@@ -166,10 +166,6 @@ async def gate_endpoint(request: GateRequest):
         "decision": result.decision.value,
         "required_next_step": result.required_next_step,
         "assumptions": result.assumptions,
-        "silo_signals": [
-            {"silo_id": s.silo_id, "verdict": s.verdict, "confidence": s.confidence, "reason": s.reason}
-            for s in result.silo_signals
-        ],
     }
 
 
