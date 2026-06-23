@@ -22,6 +22,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pathlib import Path
 
+from z1_action_guard import ActionGuard, ActionDecision
+from z1_dam import z1Dam, DamDecision
 from reflect_evolve_log_compress import reflect, evolve, log_event
 from rmpl_silo_router import route_and_write, load_context_for_mode
 
@@ -67,11 +69,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+dam = z1Dam()
+guard = ActionGuard()
+
 
 class ChatRequest(BaseModel):
     prompt: str
     context: str = ""
     mode: str = MODE
+
+
+class GateRequest(BaseModel):
+    instruction: str
+    confirmation: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +128,48 @@ async def status():
         "mode": MODE,
         "silo_base": str(SILO_BASE),
         "files_loaded": files,
+    }
+
+
+@app.post("/gate")
+async def gate_endpoint(request: GateRequest):
+    """
+    Deterministic gate check. Returns a structured verdict from the DAM layer.
+    No inference is called — this is pure Python governance.
+    """
+    result = dam.inspect_request(
+        request.instruction,
+        confirmation=request.confirmation,
+    )
+
+    decision_map = {
+        DamDecision.ALLOW: "ALLOW",
+        DamDecision.STOP_FOR_CLARITY: "STOP_FOR_CLARITY",
+        DamDecision.BLOCK_DESTRUCTIVE: "BLOCK",
+        DamDecision.LEDGER_FAILURE: "BLOCK",
+        DamDecision.LEDGER_CONFLICT: "BLOCK",
+        DamDecision.RESERVOIR_AUTH_REQUIRED: "BLOCK",
+    }
+
+    verdict = decision_map.get(result.decision, "BLOCK")
+
+    # Build reason from silo signals
+    reasons = []
+    for sig in result.silo_signals:
+        if sig.verdict != "ALLOW":
+            reasons.append(sig.reason)
+    reason = reasons[0] if reasons else result.reason
+
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "decision": result.decision.value,
+        "required_next_step": result.required_next_step,
+        "assumptions": result.assumptions,
+        "silo_signals": [
+            {"silo_id": s.silo_id, "verdict": s.verdict, "confidence": s.confidence, "reason": s.reason}
+            for s in result.silo_signals
+        ],
     }
 
 
