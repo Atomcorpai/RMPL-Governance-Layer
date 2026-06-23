@@ -133,41 +133,39 @@ async def status():
 
 @app.post("/gate")
 async def gate_endpoint(request: GateRequest):
-    """
-    Deterministic gate check. Returns a structured verdict from the DAM layer.
-    No inference is called — this is pure Python governance.
-    """
-    result = dam.inspect_request(
-        request.instruction,
-        confirmation=request.confirmation,
-    )
+    try:
+        result = dam.inspect_request(
+            request.instruction,
+            confirmation=request.confirmation,
+        )
 
-    decision_map = {
-        DamDecision.ALLOW: "ALLOW",
-        DamDecision.STOP_FOR_CLARITY: "STOP_FOR_CLARITY",
-        DamDecision.BLOCK_DESTRUCTIVE: "BLOCK",
-        DamDecision.LEDGER_FAILURE: "BLOCK",
-        DamDecision.LEDGER_CONFLICT: "BLOCK",
-        DamDecision.RESERVOIR_AUTH_REQUIRED: "BLOCK",
-    }
+        decision_map = {
+            DamDecision.ALLOW: "ALLOW",
+            DamDecision.STOP_FOR_CLARITY: "STOP_FOR_CLARITY",
+            DamDecision.BLOCK_DESTRUCTIVE: "BLOCK",
+            DamDecision.LEDGER_FAILURE: "BLOCK",
+            DamDecision.LEDGER_CONFLICT: "BLOCK",
+            DamDecision.RESERVOIR_AUTH_REQUIRED: "BLOCK",
+        }
 
-    verdict = decision_map.get(result.decision, "BLOCK")
+        verdict = decision_map.get(result.decision, "BLOCK")
+        reason = getattr(result, 'reason', 'No reason available.')
 
-    # Build reason from silo signals
-    reasons = []
-    for sig in result.silo_signals:
-        if sig.verdict != "ALLOW":
-            reasons.append(sig.reason)
-    reason = reasons[0] if reasons else result.reason
-
-    return {
-        "verdict": verdict,
-        "reason": reason,
-        "decision": result.decision.value,
-        "required_next_step": result.required_next_step,
-        "assumptions": result.assumptions,
-    }
-
+        return {
+            "verdict": verdict,
+            "reason": reason,
+            "decision": result.decision.value,
+            "required_next_step": getattr(result, 'required_next_step', None),
+            "assumptions": getattr(result, 'assumptions', []),
+        }
+    except Exception as e:
+        return {
+            "verdict": "BLOCK",
+            "reason": f"Gate error: {str(e)}",
+            "decision": "error",
+            "required_next_step": None,
+            "assumptions": [],
+        }
 
 @app.get("/audit/flags")
 async def get_flags():
