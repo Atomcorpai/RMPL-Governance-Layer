@@ -1,204 +1,379 @@
 """
-z1_action_guard.py
-Action-risk classifier for the z1/RMPL dam layer.
+rmpl_action_gate.py
 
-Role:
-    Classify user/runtime requests before execution.
-    This module does not execute actions. It only returns a decision.
+Two-stage action gate predictor.
 
-Design goals:
-    - boring, explicit, auditable
-    - destructive/evidence-affecting actions require confirmation
-    - ambiguous instructions stop for clarity
-    - safe/reversible analysis proceeds
+Stage 1: Deterministic rules (fast, high precision, no model).
+Stage 2: 3B auditor model for ambiguous boundary cases only.
+
+Rule IDs:
+    R0 = schema/parse failure (default BLOCK)
+    R1 = destructive or irreversible action
+    R2 = external side effects
+    R3 = reservoir access violation
+    R4 = ambiguous or uncertain (default BLOCK, low confidence)
+
+Usage:
+    from rmpl_action_gate import predict_action_gate
+    result = predict_action_gate("delete all files in archive", ctx={})
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
+import json
 import re
-from typing import Iterable, List
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import requests
 
 
-class ActionDecision(str, Enum):
-    ALLOW = "ALLOW"
-    STOP_FOR_CLARITY = "STOP_FOR_CLARITY"
-    REQUIRE_CONFIRMATION = "REQUIRE_CONFIRMATION"
-    BLOCK = "BLOCK"
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_AUDITOR_URL = "http://localhost:11434/api/generate"
+DEFAULT_AUDITOR_MODEL = "llama3.2:3b"
+CONFIDENCE_THRESHOLD = 0.5  # Below this, ALLOW flips to STOP escalation
 
 
-@dataclass
-class GuardResult:
-    decision: ActionDecision
-    reason: str
-    matched_terms: List[str] = field(default_factory=list)
-    risk_level: str = "low"
-    reversible: bool = True
-    evidence_affecting: bool = False
-    destructive: bool = False
-
+# ---------------------------------------------------------------------------
+# Rule term lists
+# ---------------------------------------------------------------------------
 
 DESTRUCTIVE_TERMS = [
     "delete", "remove", "wipe", "erase", "destroy", "purge", "trash",
     "overwrite", "replace", "reset", "format", "drop table", "truncate",
+    "terminate", "kill", "shutdown", "uninstall",
 ]
 
-EVIDENCE_AFFECTING_TERMS = [
-    "edit evidence", "alter evidence", "modify evidence", "change evidence",
-    "redact original", "rename original", "delete original", "overwrite original",
-    "compress evidence", "re-save evidence", "metadata", "timestamp",
-]
-
-EXTERNAL_ACTION_TERMS = [
+EXTERNAL_TERMS = [
     "send", "submit", "file", "publish", "post", "email", "forward",
     "upload", "commit", "push", "merge", "deploy", "release",
+    "payment", "transfer", "notify", "broadcast",
 ]
 
-AMBIGUOUS_TARGET_TERMS = [
-    "clean up", "fix it", "fix this", "handle it", "do it",
+RESERVOIR_TERMS = [
+    "reservoir", "cold storage", "archive", "old files", "chat history",
+    "dump.txt", ".gsd", "scaffolding files",
+]
+
+AMBIGUOUS_TERMS = [
+    "clean up", "fix it", "fix this", "handle it", "handle the", "do it",
     "make it work", "update everything", "delete the bad ones",
-    "remove the wrong ones", "archive everything",
+    "remove the wrong ones", "archive everything", "take care of it",
+    "deal with it", "sort it out",
 ]
 
-SAFE_DRAFT_TERMS = [
-    "draft", "review", "summarize", "analyze", "inspect", "compare",
-    "explain", "classify", "triage", "recommend", "make a checklist",
+TARGET_MARKERS = [
+    "file", "folder", "path", "named", "called", "this file", "these files",
+    ".py", ".json", ".md", ".txt", "only", "specific", "the following",
 ]
+
+OPEN_RESERVOIR_PREFIX = "open_reservoir:"
+
+
+# ---------------------------------------------------------------------------
+# Output types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GateDecision:
+    verdict: str                          # ALLOW | BLOCK | STOP_FOR_CLARITY
+    rule_id: str                          # R0-R4
+    confidence: float                     # 0.0 - 1.0
+    risk_tags: List[str]
+    rationale: str
+    evidence: List[str]
+    needs_human: bool
+    receipt_id: str
+    stage: str                            # deterministic | auditor
+    raw_model_output: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _new_receipt() -> str:
+    return f"gate_{uuid.uuid4().hex[:12]}_{int(time.time())}"
 
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
-def _matched_terms(text: str, terms: Iterable[str]) -> List[str]:
-    lower = _normalize(text)
-    return [term for term in terms if term in lower]
+def _matched(text: str, terms: list) -> List[str]:
+    return [t for t in terms if t in text]
 
 
-def _has_explicit_target(text: str) -> bool:
-    lower = _normalize(text)
-    target_markers = [
-        "file", "folder", "path", "named", "called", "this file", "these files",
-        ".py", ".json", ".md", ".docx", ".pdf", ".zip", "only", "specific",
-    ]
-    return any(marker in lower for marker in target_markers)
+def _has_target(text: str) -> bool:
+    return any(m in text for m in TARGET_MARKERS)
 
 
-class ActionGuard:
+def _extract_evidence(text: str, terms: List[str], max_chars: int = 80) -> List[str]:
+    evidence = []
+    for term in terms[:3]:
+        idx = text.find(term)
+        if idx != -1:
+            snippet = text[max(0, idx - 20):idx + len(term) + 20].strip()
+            evidence.append(f"...{snippet}...")
+    return evidence
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: Deterministic predictor
+# ---------------------------------------------------------------------------
+
+def _deterministic_gate(
+    text: str,
+    lower: str,
+    ctx: Dict[str, Any],
+) -> Optional[GateDecision]:
     """
-    Classifies requests before the dam allows execution.
-
-    confirmation=True means the user explicitly confirmed the action in the
-    current interaction, not merely implied it historically.
-    inspected_artifact=True means the relevant artifact was inspected or the
-    request is not artifact-dependent.
+    Returns a GateDecision if a deterministic rule fires, otherwise None.
+    None means: send to auditor model.
     """
+    receipt = _new_receipt()
 
-    def classify(
-        self,
-        request_text: str,
-        *,
-        confirmation: bool = False,
-        inspected_artifact: bool = True,
-    ) -> GuardResult:
-        text = _normalize(request_text)
-
-        if not text:
-            return GuardResult(
-                ActionDecision.STOP_FOR_CLARITY,
-                "Empty request cannot be safely classified.",
-                risk_level="unknown",
-            )
-
-        ambiguous = _matched_terms(text, AMBIGUOUS_TARGET_TERMS)
-        if ambiguous and not _has_explicit_target(text):
-            return GuardResult(
-                ActionDecision.STOP_FOR_CLARITY,
-                "Instruction is ambiguous and lacks a specific target/scope.",
-                matched_terms=ambiguous,
-                risk_level="ambiguous",
-            )
-
-        destructive = _matched_terms(text, DESTRUCTIVE_TERMS)
-        evidence = _matched_terms(text, EVIDENCE_AFFECTING_TERMS)
-        external = _matched_terms(text, EXTERNAL_ACTION_TERMS)
-
-        if evidence:
-            if confirmation and inspected_artifact:
-                return GuardResult(
-                    ActionDecision.ALLOW,
-                    "Evidence-affecting action allowed only because explicit confirmation and artifact inspection are present.",
-                    matched_terms=evidence,
-                    risk_level="high",
-                    reversible=False,
-                    evidence_affecting=True,
+    # Reservoir access without authorization
+    if any(t in lower for t in RESERVOIR_TERMS):
+        if not str(ctx.get("reservoir_scope", "") or "").strip():
+            raw = ctx.get("raw_text", text)
+            if OPEN_RESERVOIR_PREFIX not in raw.lower():
+                return GateDecision(
+                    verdict="BLOCK",
+                    rule_id="R3",
+                    confidence=0.99,
+                    risk_tags=["reservoir_access_violation"],
+                    rationale="Reservoir access attempted without OPEN_RESERVOIR:[scope] prefix.",
+                    evidence=_extract_evidence(lower, RESERVOIR_TERMS),
+                    needs_human=True,
+                    receipt_id=receipt,
+                    stage="deterministic",
                 )
-            return GuardResult(
-                ActionDecision.REQUIRE_CONFIRMATION,
-                "Evidence-affecting action requires explicit confirmation and artifact inspection.",
-                matched_terms=evidence,
-                risk_level="high",
-                reversible=False,
-                evidence_affecting=True,
-            )
 
-        if destructive:
-            if confirmation and inspected_artifact:
-                return GuardResult(
-                    ActionDecision.ALLOW,
-                    "Destructive action allowed only because explicit confirmation and artifact inspection are present.",
-                    matched_terms=destructive,
-                    risk_level="high",
-                    reversible=False,
-                    destructive=True,
-                )
-            return GuardResult(
-                ActionDecision.REQUIRE_CONFIRMATION,
-                "Destructive or irreversible action requires explicit confirmation.",
-                matched_terms=destructive,
-                risk_level="high",
-                reversible=False,
-                destructive=True,
-            )
-
-        if external:
-            if confirmation:
-                return GuardResult(
-                    ActionDecision.ALLOW,
-                    "External/action-taking request allowed because explicit confirmation is present.",
-                    matched_terms=external,
-                    risk_level="medium",
-                    reversible=False,
-                )
-            return GuardResult(
-                ActionDecision.REQUIRE_CONFIRMATION,
-                "External action requires explicit confirmation before execution.",
-                matched_terms=external,
-                risk_level="medium",
-                reversible=False,
-            )
-
-        safe = _matched_terms(text, SAFE_DRAFT_TERMS)
-        if safe:
-            return GuardResult(
-                ActionDecision.ALLOW,
-                "Safe reversible analysis/drafting request.",
-                matched_terms=safe,
-                risk_level="low",
-                reversible=True,
-            )
-
-        if not inspected_artifact and _has_explicit_target(text):
-            return GuardResult(
-                ActionDecision.STOP_FOR_CLARITY,
-                "Referenced artifact has not been inspected.",
-                risk_level="ambiguous",
-            )
-
-        return GuardResult(
-            ActionDecision.ALLOW,
-            "No destructive, evidence-affecting, external, or ambiguous trigger detected.",
-            risk_level="low",
-            reversible=True,
+    # Destructive terms
+    destructive = _matched(lower, DESTRUCTIVE_TERMS)
+    if destructive:
+        return GateDecision(
+            verdict="BLOCK",
+            rule_id="R1",
+            confidence=0.97,
+            risk_tags=["destructive"],
+            rationale=f"Destructive action detected: {', '.join(destructive[:3])}. Explicit confirmation required.",
+            evidence=_extract_evidence(lower, destructive),
+            needs_human=True,
+            receipt_id=receipt,
+            stage="deterministic",
         )
+
+    # External side effects
+    external = _matched(lower, EXTERNAL_TERMS)
+    if external:
+        return GateDecision(
+            verdict="BLOCK",
+            rule_id="R2",
+            confidence=0.95,
+            risk_tags=["external_side_effect"],
+            rationale=f"External action detected: {', '.join(external[:3])}. Explicit confirmation required.",
+            evidence=_extract_evidence(lower, external),
+            needs_human=True,
+            receipt_id=receipt,
+            stage="deterministic",
+        )
+
+    # Ambiguous without target
+    ambiguous = _matched(lower, AMBIGUOUS_TERMS)
+    if ambiguous and not _has_target(lower):
+        return GateDecision(
+            verdict="STOP_FOR_CLARITY",
+            rule_id="R4",
+            confidence=0.90,
+            risk_tags=["ambiguous"],
+            rationale=f"Ambiguous instruction without clear target: {', '.join(ambiguous[:3])}.",
+            evidence=_extract_evidence(lower, ambiguous),
+            needs_human=True,
+            receipt_id=receipt,
+            stage="deterministic",
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: Auditor model
+# ---------------------------------------------------------------------------
+
+ACTION_GATE_PROMPT = """You are a runtime auditor. Classify whether this action requires confirmation before execution.
+
+ACTION_GATE LABELS:
+- ALLOW: safe, non-destructive, no external side effects, unambiguous.
+- BLOCK: destructive/irreversible/external OR ambiguous OR missing required confirmation.
+- If uncertain: output BLOCK with confidence <= 0.49 and rule_id=R4. Never hedge.
+
+RULE IDs:
+- R0: schema/parse failure
+- R1: destructive or irreversible
+- R2: external side effects
+- R3: reservoir access violation
+- R4: ambiguous or uncertain
+
+Respond ONLY with valid JSON. No prose before or after.
+
+Required schema:
+{
+  "ok": true,
+  "task": "action_gate",
+  "verdict": "ALLOW" | "BLOCK",
+  "confidence": 0.0,
+  "rule_id": "R0" | "R1" | "R2" | "R3" | "R4",
+  "rationale": "<=240 chars",
+  "evidence": ["<=3 short quotes"]
+}
+
+Action to classify: {action}
+"""
+
+
+def _auditor_gate(
+    text: str,
+    ollama_url: str,
+    model: str,
+    timeout: int = 30,
+) -> GateDecision:
+    receipt = _new_receipt()
+    prompt = ACTION_GATE_PROMPT.format(action=text)
+
+    try:
+        response = requests.post(
+            ollama_url,
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.0, "num_ctx": 2048},
+            },
+            timeout=timeout,
+        )
+        raw = response.json().get("response", "").strip()
+    except Exception as e:
+        return GateDecision(
+            verdict="BLOCK",
+            rule_id="R0",
+            confidence=0.0,
+            risk_tags=["model_error"],
+            rationale=f"Model call failed: {str(e)[:100]}",
+            evidence=[],
+            needs_human=True,
+            receipt_id=receipt,
+            stage="auditor",
+            raw_model_output=str(e),
+        )
+
+    # Parse JSON
+    try:
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(clean)
+    except Exception:
+        return GateDecision(
+            verdict="BLOCK",
+            rule_id="R0",
+            confidence=0.0,
+            risk_tags=["invalid_json"],
+            rationale="Model output was not valid JSON. Defaulting to BLOCK.",
+            evidence=[raw[:80]] if raw else [],
+            needs_human=True,
+            receipt_id=receipt,
+            stage="auditor",
+            raw_model_output=raw,
+        )
+
+    verdict = parsed.get("verdict", "BLOCK")
+    if verdict not in {"ALLOW", "BLOCK"}:
+        verdict = "BLOCK"
+
+    confidence = float(parsed.get("confidence", 0.0))
+    rule_id = parsed.get("rule_id", "R4")
+    rationale = str(parsed.get("rationale", ""))[:240]
+    evidence = parsed.get("evidence", [])[:3]
+
+    # If ALLOW but confidence below threshold, escalate
+    needs_human = verdict == "BLOCK" or confidence < CONFIDENCE_THRESHOLD
+
+    return GateDecision(
+        verdict=verdict,
+        rule_id=rule_id,
+        confidence=confidence,
+        risk_tags=["auditor_allow"] if verdict == "ALLOW" else ["auditor_block"],
+        rationale=rationale,
+        evidence=evidence,
+        needs_human=needs_human,
+        receipt_id=receipt,
+        stage="auditor",
+        raw_model_output=raw,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def predict_action_gate(
+    text: str,
+    ctx: Optional[Dict[str, Any]] = None,
+    *,
+    ollama_url: str = DEFAULT_AUDITOR_URL,
+    model: str = DEFAULT_AUDITOR_MODEL,
+    use_auditor: bool = True,
+    timeout: int = 30,
+) -> GateDecision:
+    """
+    Two-stage action gate.
+
+    Stage 1: Deterministic rules. Fast, high precision, no model.
+    Stage 2: 3B auditor model for ambiguous boundary cases only.
+
+    Args:
+        text: The request or action text to classify.
+        ctx: Optional session context (reservoir_scope, confirmation_granted, etc.)
+        ollama_url: Ollama API endpoint.
+        model: Auditor model name.
+        use_auditor: If False, only deterministic stage runs (useful for testing).
+        timeout: Model call timeout in seconds.
+
+    Returns:
+        GateDecision with verdict, rule_id, confidence, and receipt_id.
+    """
+    ctx = ctx or {}
+    ctx["raw_text"] = text
+    lower = _normalize(text)
+
+    # Stage 1
+    deterministic = _deterministic_gate(text, lower, ctx)
+    if deterministic is not None:
+        return deterministic
+
+    # Stage 2
+    if not use_auditor:
+        receipt = _new_receipt()
+        return GateDecision(
+            verdict="ALLOW",
+            rule_id="R4",
+            confidence=0.5,
+            risk_tags=["no_auditor"],
+            rationale="No deterministic rule matched. Auditor disabled. Defaulting to ALLOW.",
+            evidence=[],
+            needs_human=False,
+            receipt_id=receipt,
+            stage="deterministic",
+        )
+
+    return _auditor_gate(text, ollama_url=ollama_url, model=model, timeout=timeout)
