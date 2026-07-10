@@ -8,10 +8,13 @@ Role:
     Injects relevant silo context into model prompt.
     Surfaces audit flags to human. Never acts on them autonomously.
 
-Phase 2 (not yet released):
-    rmpl_audit_coordinator.py — silo-level auditor integration.
-    Audit endpoints below are stubbed and will return placeholder responses
-    until rmpl_audit_coordinator is wired in.
+Phase 2 changes (this version):
+    /gate endpoint now pulls silo context from gumbo_silo_manifest via
+    gate_context_from_silo() and passes it into guard.classify().
+    Router determines silo. Python enforces silo rules. No inference called.
+
+Phase 3 (not yet released):
+    z1_audit_coordinator.py — silo-level auditor integration.
 """
 
 import os
@@ -22,21 +25,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pathlib import Path
 
-from z1_action_guard import ActionGuard, ActionDecision
+from z1_action_guard import ActionGuard, ActionDecision, gate_context_from_silo
+from z1_dam import z1Dam, DamDecision
 from reflect_evolve_log_compress import reflect, evolve, log_event
-from rmpl_silo_router import route_and_write, load_context_for_mode
-
-# Phase 2: from rmpl_audit_coordinator import AuditCoordinator
+from z1_silo_router import route_and_write, route_to_silo, load_context_for_mode
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-AUDITOR_MODEL = os.environ.get("AUDITOR_MODEL", "claude-haiku-4-5-20251001")
 LIB_PATH = os.environ.get("z1_LIB_PATH", os.path.dirname(os.path.abspath(__file__)))
-SILO_BASE = Path(os.environ.get("RMPL_SILO_PATH", os.path.join(LIB_PATH, "silos")))
-MODE = os.environ.get("RMPL_MODE", "default")
+SILO_BASE = Path(os.environ.get("z1_SILO_PATH", os.path.join(LIB_PATH, "silos")))
+MODE = os.environ.get("z1_MODE", "default")
 
 # ---------------------------------------------------------------------------
 # Anthropic client
@@ -48,14 +49,13 @@ client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 # System prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a runtime governance assistant operating within the RMPL stack.
+SYSTEM_PROMPT = """You are a runtime governance assistant operating within the z1 stack.
 Be direct and accurate. Do not invent continuity.
 Verify before claiming. Stop before guessing. Ask before acting on ambiguous instructions.
 Destructive or irreversible actions require explicit confirmation before execution."""
 
 # ---------------------------------------------------------------------------
 # App
-# Phase 2: coordinator = AuditCoordinator(base=SILO_BASE, model=AUDITOR_MODEL)
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="z1 Bridge")
@@ -68,8 +68,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+dam = z1Dam()
 guard = ActionGuard()
 
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
     prompt: str
@@ -80,6 +85,7 @@ class ChatRequest(BaseModel):
 class GateRequest(BaseModel):
     instruction: str
     confirmation: bool = False
+    silo_id: str | None = None   # optional override; router determines if not supplied
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +104,7 @@ def run_inference(user_prompt: str, reflection_context: str = "", silo_context: 
             model=ANTHROPIC_MODEL,
             max_tokens=1024,
             system=SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": full_prompt}
-            ],
+            messages=[{"role": "user", "content": full_prompt}],
         )
         return message.content[0].text
     except Exception as e:
@@ -121,8 +125,7 @@ async def status():
         "status": "ONLINE",
         "system": "z1",
         "model": ANTHROPIC_MODEL,
-        "auditor_model": AUDITOR_MODEL,
-        "auditor_status": "PHASE_2_PENDING",
+        "auditor_status": "PHASE_3_PENDING",
         "mode": MODE,
         "silo_base": str(SILO_BASE),
         "files_loaded": files,
@@ -132,58 +135,97 @@ async def status():
 @app.post("/gate")
 async def gate_endpoint(request: GateRequest):
     """
-    Deterministic gate check via ActionGuard.
-    Pure Python — no ledger dependency, no inference call.
+    Deterministic gate check with silo context.
+
+    Flow:
+      1. Router determines silo from instruction text (or uses caller-supplied silo_id).
+      2. gate_context_from_silo() pulls the GateRuleset for that silo.
+      3. ActionGuard.classify() enforces silo rules + five governance rules.
+      4. z1Dam.inspect_request() arbitrates signals and returns final verdict.
+
+    No inference is called. This is pure Python governance.
     """
-    try:
-        result = guard.classify(
-            request.instruction,
-            confirmation=request.confirmation,
-            inspected_artifact=True,
-        )
+    instruction = request.instruction
 
+    # 1. Determine silo
+    silo_id = request.silo_id or route_to_silo(instruction)
+
+    # 2. Pull silo gate context from manifest
+    silo_ctx = gate_context_from_silo(silo_id)
+
+    # 3. Run dam (which calls guard internally) — pass silo_id so dam can
+    #    short-circuit on system_gate_active=False silos
+    dam_result = dam.inspect_request(
+        instruction,
+        confirmation=request.confirmation,
+        silo_id=silo_id,
+    )
+
+    # 4. Also run guard directly with silo_ctx so silo hard stops and rule
+    #    overrides are applied on top of dam signals
+    guard_result = guard.classify(
+        instruction,
+        confirmation=request.confirmation,
+        silo_context=silo_ctx,
+    )
+
+    # 5. Guard result takes precedence on hard stops; otherwise use dam verdict
+    if guard_result.silo_hard_stop:
+        verdict = "BLOCK"
+        reason = guard_result.reason
+        triggered_rules = [r.value for r in guard_result.triggered_rules]
+    else:
         decision_map = {
-            ActionDecision.ALLOW: "ALLOW",
-            ActionDecision.STOP_FOR_CLARITY: "STOP_FOR_CLARITY",
-            ActionDecision.REQUIRE_CONFIRMATION: "BLOCK",
-            ActionDecision.BLOCK: "BLOCK",
+            DamDecision.ALLOW: "ALLOW",
+            DamDecision.STOP_FOR_CLARITY: "STOP_FOR_CLARITY",
+            DamDecision.BLOCK_DESTRUCTIVE: "BLOCK",
+            DamDecision.LEDGER_FAILURE: "BLOCK",
+            DamDecision.LEDGER_CONFLICT: "BLOCK",
+            DamDecision.RESERVOIR_AUTH_REQUIRED: "BLOCK",
         }
+        verdict = decision_map.get(dam_result.decision, "BLOCK")
+        reasons = [s.reason for s in dam_result.silo_signals if s.verdict != "ALLOW"]
+        reason = reasons[0] if reasons else dam_result.reason
+        triggered_rules = [r.value for r in guard_result.triggered_rules]
 
-        verdict = decision_map.get(result.decision, "BLOCK")
-
-        return {
-            "verdict": verdict,
-            "reason": result.reason,
-            "risk_level": result.risk_level,
-            "reversible": result.reversible,
-            "matched_terms": result.matched_terms,
-        }
-    except Exception as e:
-        return {
-            "verdict": "BLOCK",
-            "reason": f"Gate error: {str(e)}",
-            "risk_level": "unknown",
-            "reversible": False,
-            "matched_terms": [],
-        }
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "silo_id": silo_id,
+        "silo_gate_active": silo_ctx.get("system_gate_active", True),
+        "triggered_rules": triggered_rules,
+        "risk_level": guard_result.risk_level,
+        "decision": dam_result.decision.value,
+        "required_next_step": dam_result.required_next_step,
+        "assumptions": dam_result.assumptions,
+        "silo_signals": [
+            {
+                "silo_id": s.silo_id,
+                "verdict": s.verdict,
+                "confidence": s.confidence,
+                "reason": s.reason,
+            }
+            for s in dam_result.silo_signals
+        ],
+    }
 
 
 @app.get("/audit/flags")
 async def get_flags():
-    """Phase 2 stub. Returns empty until rmpl_audit_coordinator is wired in."""
-    return {"flag_count": 0, "flags": [], "status": "PHASE_2_PENDING"}
+    """Phase 3 stub."""
+    return {"flag_count": 0, "flags": [], "status": "PHASE_3_PENDING"}
 
 
 @app.get("/audit/tarpit")
 async def tarpit_status():
-    """Phase 2 stub."""
-    return {"tarpit_status": {}, "status": "PHASE_2_PENDING"}
+    """Phase 3 stub."""
+    return {"tarpit_status": {}, "status": "PHASE_3_PENDING"}
 
 
 @app.post("/audit/release/{silo}")
 async def release_tarpit(silo: str, confirmed_by: str = "human"):
-    """Phase 2 stub."""
-    return {"released": None, "status": "PHASE_2_PENDING"}
+    """Phase 3 stub."""
+    return {"released": None, "status": "PHASE_3_PENDING"}
 
 
 @app.get("/ls")
@@ -221,12 +263,10 @@ async def chat_endpoint(request: ChatRequest):
         silo_context=silo_context,
     )
 
-    # 5. Route response to silo too
+    # 5. Route response to silo
     route_and_write(response_text, source="assistant", base=SILO_BASE)
 
-    # 6. Phase 2: audit_result = coordinator.audit_silo(routed_silo, incoming_content=request.prompt)
-
-    # 7. Log event and evolve
+    # 6. Log event and evolve
     log_event(request.prompt, kind="user_input", mode=mode)
     evolve(trigger=f"Input: {request.prompt[:60]}")
 
@@ -234,7 +274,7 @@ async def chat_endpoint(request: ChatRequest):
         "response": response_text,
         "routed_to": routed_silo,
         "audit": {
-            "status": "PHASE_2_PENDING",
+            "status": "PHASE_3_PENDING",
             "flag_count": 0,
             "flags": [],
             "tarpit_active": False,
