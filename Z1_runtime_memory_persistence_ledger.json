@@ -1,12 +1,12 @@
 {
-  "schema": "z1.rmpl.v1",
+  "schema": "z1.z1.v1",
   "version": "1.0",
   "created_at": "2026-05-04T00:00:00+00:00",
   "updated_at": "2026-05-04T09:56:48.426620+00:00",
   "system": "z1",
   "purpose": "small authoritative continuity record for runtime governance",
   "current_task_state": {
-    "active_goal": "Recover and rebuild z1 dam/reservoir governance layer from RMPL spec and recovered runtime files.",
+    "active_goal": "Recover and rebuild z1 dam/reservoir governance layer from z1 spec and recovered runtime files.",
     "source_rule": "Preserve z1 namespace in source; translate only for external presentation."
   },
   "verified_facts": [
@@ -24,7 +24,7 @@
     },
     {
       "at": "2026-05-04T00:00:00+00:00",
-      "decision": "Break RMPL/dam behavior into rmpl_core.py, z1_action_guard.py, z1_reservoir_gate.py, and z1_dam.py."
+      "decision": "Break z1/dam behavior into z1_core.py, z1_action_guard.py, z1_reservoir_gate.py, and z1_dam.py."
     }
   ],
   "open_loops": [
