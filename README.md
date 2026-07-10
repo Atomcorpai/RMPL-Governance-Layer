@@ -2,7 +2,7 @@
 
 **Governance infrastructure for agentic AI systems.**
 
-RMPL is a Python middleware stack that intercepts, classifies, and governs every action and memory operation in an agentic AI pipeline. It is model-agnostic and tool-agnostic. Any model plugged into the stack inherits the same governance behavior. Any tool added to the stack is automatically subject to auditor oversight — not just memory, but every tool.
+Z1Governs is a Python middleware stack that intercepts, classifies, and governs every action and memory operation in an agentic AI pipeline. It is model-agnostic and tool-agnostic. Any model plugged into the stack inherits the same governance behavior. Any tool added to the stack is automatically subject to auditor oversight — not just memory, but every tool.
 
 ---
 
