@@ -1,5 +1,5 @@
-"""
-rmpl_silo_router.py
+s"""
+z1_silo_router.py
 
 Deterministic keyword-based silo router.
 No model required. Python only.
@@ -12,7 +12,7 @@ Silos:
     other            -- catch-all for unclassifiable content
 
 Usage:
-    from rmpl_silo_router import route_to_silo
+    from z1_silo_router import route_to_silo
     silo = route_to_silo("the auditor hit 82 percent zero shot")
     # -> "technical_builds"
 """
@@ -27,10 +27,10 @@ from typing import Dict, List, Optional, Tuple
 
 SILO_MANIFESTS: Dict[str, List[str]] = {
     "core_runtime": [
-        "ledger", "dam", "reservoir", "reflect", "evolve", "rmpl", "auditor",
+        "ledger", "dam", "reservoir", "reflect", "evolve", "z1", "auditor",
         "dump.txt", "z1", "bridge", "tarpit", "silo", "governance",
         "context packet", "compression", "journal", "log_event", "open_reservoir",
-        "rmpl_core", "z1_dam", "action_guard", "reservoir_gate",
+        "z1_core", "z1_dam", "action_guard", "reservoir_gate",
         "runtime_memory", "persist", "continuity", "provenance", "receipt_id",
         "ledger_ok", "ledger_failure", "stop_for_clarity", "block_destructive",
         "ingest_dump", "reflect_evolve", "kernel", "packet", "session_event",
@@ -43,7 +43,7 @@ SILO_MANIFESTS: Dict[str, List[str]] = {
         "jsonl", "checkpoint", "epoch", "batch", "learning rate", "loss",
         "conflict_detection", "stale_context", "action_gate", "tarpit_detection",
         "zero-shot", "zero shot", "classification", "binary", "verdict",
-        "rmpl_auditor", "dam_eval", "dam eval", "action_gate_eval", "action gate eval", "reflect_eval",
+        "z1_auditor", "dam_eval", "dam eval", "action_gate_eval", "action gate eval", "reflect_eval",
         "action gate", "deterministic stage", "action_gate_eval_results",
         "z1_bridge", "sys.path", "import", "def ", "class ", "dataclass",
     ],
