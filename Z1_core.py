@@ -1,5 +1,5 @@
 """
-Runtime Memory Persistence Ledger (RMPL)
+Runtime Memory Persistence Ledger (z1)
 Version: 1.4
 Date: 2026-04-29
 System: z1 — Cognition Runtime Operating System
@@ -7,7 +7,7 @@ System: z1 — Cognition Runtime Operating System
 Purpose:
     A small, authoritative continuity and provenance record for agent runtime governance.
 
-RMPL is:
+z1 is:
     - not RAG
     - not identity roleplay
     - not a memory dump
@@ -34,7 +34,7 @@ import os
 import shutil
 
 
-RMPL_VERSION = "1.4"
+z1_VERSION = "1.4"
 SYSTEM_NAME = "z1"
 SYSTEM_TYPE = "Cognition Runtime Operating System"
 
@@ -154,7 +154,7 @@ class ActionRequest:
 
 @dataclass
 class RuntimeMemoryPersistenceLedger:
-    version: str = RMPL_VERSION
+    version: str = z1_VERSION
     system_name: str = SYSTEM_NAME
     system_type: str = SYSTEM_TYPE
     created_at: str = field(default_factory=lambda: utc_now())
@@ -199,7 +199,7 @@ class RuntimeMemoryPersistenceLedger:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "RuntimeMemoryPersistenceLedger":
         ledger = cls(
-            version=data.get("version", RMPL_VERSION),
+            version=data.get("version", z1_VERSION),
             system_name=data.get("system_name", SYSTEM_NAME),
             system_type=data.get("system_type", SYSTEM_TYPE),
             created_at=data.get("created_at", utc_now()),
@@ -257,7 +257,7 @@ CORE_RULES: List[RuntimeRule] = [
     RuntimeRule("anti_deflection_rule", "Do not use unrelated suggestions as an exit ramp from unresolved work. State the actual blocker.", 30),
     RuntimeRule("anti_literalism_rule", "Implementation reality overrides metaphor. Do not treat jokes, lore, names, or anchors as capabilities.", 30),
     RuntimeRule("no_clean_substrate_rule", "Do not assume any model is a blank slate. Detect substrate-specific distortion.", 40),
-    RuntimeRule("platform_independence_rule", "RMPL must not depend on any single hosted platform, provider, or proprietary assistant environment.", 40),
+    RuntimeRule("platform_independence_rule", "z1 must not depend on any single hosted platform, provider, or proprietary assistant environment.", 40),
 ]
 
 
@@ -436,19 +436,19 @@ def verify_packet(packet: Dict[str, Any], signature: str, key: bytes) -> bool:
 
 def create_initial_ledger() -> RuntimeMemoryPersistenceLedger:
     ledger = RuntimeMemoryPersistenceLedger()
-    ledger.current_task = "Build and validate RMPL as the core continuity/provenance component of z1."
+    ledger.current_task = "Build and validate z1 as the core continuity/provenance component of z1."
     for rule in CORE_RULES:
         ledger.add_rule(rule.name, rule.rule, rule.priority)
 
     ledger.add_fact(
-        "RMPL is a small, authoritative continuity and provenance record for agent runtime governance.",
+        "z1 is a small, authoritative continuity and provenance record for agent runtime governance.",
         FactBasis.USER_STATED,
-        "RMPL v1.4 canonical construction session",
+        "z1 v1.4 canonical construction session",
     )
     ledger.add_fact(
         "The model is an inference engine. The runtime governance layer is the control surface.",
         FactBasis.USER_STATED,
-        "RMPL v1.4 canonical construction session",
+        "z1 v1.4 canonical construction session",
     )
     ledger.add_open_loop(
         "De-Gemini Python runtime files",
@@ -456,7 +456,7 @@ def create_initial_ledger() -> RuntimeMemoryPersistenceLedger:
     )
     ledger.add_open_loop(
         "Grant rewrite",
-        next_action="Use RMPL as technical spine after Python runtime files are cleaned.",
+        next_action="Use z1 as technical spine after Python runtime files are cleaned.",
     )
     return ledger
 
@@ -466,8 +466,8 @@ if __name__ == "__main__":
     save_ledger(ledger)
     append_log(RuntimeLogEvent(
         event_type="ledger_created",
-        message="Initial RMPL v1.4 ledger created.",
-        data={"version": RMPL_VERSION, "path": str(DEFAULT_LEDGER_PATH)},
+        message="Initial z1 v1.4 ledger created.",
+        data={"version": z1_VERSION, "path": str(DEFAULT_LEDGER_PATH)},
     ))
     print(f"Created {DEFAULT_LEDGER_PATH}")
     print(f"Created/updated {DEFAULT_LOG_PATH}")
