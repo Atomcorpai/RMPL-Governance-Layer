@@ -1,5 +1,5 @@
 """
-rmpl_audit_coordinator.py
+z1_audit_coordinator.py
 
 Silo-level audit coordinator for the Z1 governance stack.
 
@@ -12,7 +12,7 @@ Role:
     Human release required for tarpit unlock.
 
 Usage:
-    from rmpl_audit_coordinator import AuditCoordinator
+    from z1_audit_coordinator import AuditCoordinator
     coordinator = AuditCoordinator(base=SILO_BASE, model="llama3.2:3b", ollama_url=OLLAMA_API_URL)
     result = coordinator.audit_silo("core_runtime", incoming_content="some prompt")
 """
