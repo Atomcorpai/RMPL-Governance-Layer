@@ -14,7 +14,7 @@ Outputs:
     LEDGER_FAILURE
     RESERVOIR_AUTH_REQUIRED
 
-This file is the implementation-facing version of the RMPL dam spec.
+This file is the implementation-facing version of the z1 dam spec.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from z1_action_guard import ActionDecision, ActionGuard, GuardResult
-from rmpl_core import (
+from z1_core import (
     LedgerFailureState,
     load_ledger,
     save_ledger,
@@ -34,7 +34,7 @@ from rmpl_core import (
 
 
 # ---------------------------------------------------------------------------
-# Thin adapter: maps z1_ledger-style class API onto rmpl_core functions
+# Thin adapter: maps z1_ledger-style class API onto z1_core functions
 # so the rest of this file needs no changes.
 # ---------------------------------------------------------------------------
 
@@ -57,7 +57,7 @@ class _LedgerCheckResult:
 
 
 class RuntimeLedger:
-    """Adapter: wraps rmpl_core load_ledger/save_ledger behind the class API."""
+    """Adapter: wraps z1_core load_ledger/save_ledger behind the class API."""
 
     def load(self) -> _LedgerCheckResult:
         state, ledger, message = load_ledger()
@@ -95,6 +95,15 @@ class DamDecision(str, Enum):
 
 
 @dataclass
+class SiloSignal:
+    """One silo's read on a request. Auditors produce signals, not verdicts."""
+    silo_id: str
+    verdict: str          # ALLOW | BLOCK | STOP_FOR_CLARITY | NO_OPINION
+    confidence: float
+    reason: str
+
+
+@dataclass
 class DamResult:
     decision: DamDecision
     reason: str
@@ -103,27 +112,75 @@ class DamResult:
     ledger_status: Optional[LedgerStatus] = None
     assumptions: List[str] = field(default_factory=list)
     required_next_step: Optional[str] = None
+    silo_signals: List[SiloSignal] = field(default_factory=list)
+    arbitration_note: Optional[str] = None
+
+
+def arbitrate_signals(signals: List[SiloSignal]) -> tuple:
+    """
+    Single explicit place that resolves conflicting silo opinions.
+    Returns (resolved_verdict, arbitration_note).
+    """
+    if not signals:
+        return "UNCLASSIFIED", "No silo produced a signal. Logged as a visible gap, not defaulted to block."
+
+    opinions = [s for s in signals if s.verdict != "NO_OPINION"]
+    if not opinions:
+        names = ", ".join(s.silo_id for s in signals)
+        return "UNCLASSIFIED", f"No silo among [{names}] had an opinion. Visible gap, not a silent block."
+
+    blocks = [s for s in opinions if s.verdict == "BLOCK" and s.confidence >= 0.7]
+    if blocks:
+        names = ", ".join(f"{s.silo_id} ({s.confidence:.2f})" for s in blocks)
+        return "BLOCK", f"Blocked by: {names}."
+
+    clarifies = [s for s in opinions if s.verdict == "STOP_FOR_CLARITY"]
+    if clarifies:
+        names = ", ".join(s.silo_id for s in clarifies)
+        return "STOP_FOR_CLARITY", f"Clarification requested by: {names}."
+
+    weak_blocks = [s for s in opinions if s.verdict == "BLOCK"]
+    if weak_blocks:
+        names = ", ".join(f"{s.silo_id} ({s.confidence:.2f})" for s in weak_blocks)
+        return "STOP_FOR_CLARITY", f"Low-confidence block from: {names}. Downgraded rather than silently blocked."
+
+    names = ", ".join(s.silo_id for s in opinions)
+    return "ALLOW", f"All opinions agree: {names} -> ALLOW."
 
 
 AMBIGUOUS_ACTION_TERMS = [
-    "clean up", "fix", "remove", "archive", "update everything", "sync", "migrate", "restore", "replace", "delete", "handle",
+    "clean up everything", "fix everything", "remove everything",
+    "archive everything", "update everything", "sync everything",
+    "migrate everything", "restore everything", "replace everything",
+    "delete everything", "handle everything", "handle it", "deal with it",
+    "sort it out", "take care of it",
 ]
 
 RESERVOIR_TERMS = [
-    "reservoir", "cold storage", "archive", "old files", "chat history", "dump.txt", ".gsd", "scaffolding files",
+    "reservoir", "cold storage", "old files", "chat history",
+    "dump.txt", ".gsd", "scaffolding files",
 ]
 
 
 def _mentions_any(text: str, terms: List[str]) -> bool:
     text = (text or "").lower()
-    return any(term in text for term in terms)
+    for term in terms:
+        if ' ' in term:
+            if term in text:
+                return True
+        else:
+            if re.search(r'(?<!\w)' + re.escape(term) + r'(?!\w)', text):
+                return True
+    return False
 
 
 def _looks_ambiguous(text: str) -> bool:
     lower = (text or "").lower()
     if _mentions_any(lower, AMBIGUOUS_ACTION_TERMS):
-        # If no explicit target/scope markers, stop.
-        target_markers = ["file", "folder", "path", "named", "called", "this", "these", "only", "specific"]
+        target_markers = [
+            "file", "folder", "path", "named", "called", "this", "these",
+            "only", "specific", "the ledger", "the log", "the silo",
+        ]
         return not any(marker in lower for marker in target_markers)
     return False
 
@@ -149,13 +206,33 @@ class z1Dam:
         confirmation: bool = False,
         inspected_artifact: bool = True,
         requested_reservoir_target: Optional[str] = None,
+        silo_id: Optional[str] = None,
     ) -> DamResult:
         """
         Classify a request before runtime/tool/retrieval execution.
         This does not execute the request.
+
+        silo_id: which silo the router placed this request into, if known.
+        If that silo's gate has system_gate_active=False, skip governance
+        entirely — conversation is not the gate's job.
         """
         request_text = request_text or ""
         ledger_check = self.ledger.load()
+        signals: List[SiloSignal] = []
+
+        if silo_id:
+            try:
+                from gumbo_silo_manifest import get_gate_ruleset
+                ruleset = get_gate_ruleset(silo_id)
+                if ruleset and not ruleset.system_gate_active:
+                    return DamResult(
+                        DamDecision.ALLOW,
+                        f"Silo '{silo_id}' has system_gate_active=False. Conversational content is not governed.",
+                        ledger_status=ledger_check.status,
+                        silo_signals=[SiloSignal(silo_id, "ALLOW", 1.0, "Silo scope excludes system gate.")],
+                    )
+            except ImportError:
+                pass
 
         if ledger_check.status not in {LedgerStatus.OK, LedgerStatus.UNAVAILABLE}:
             return DamResult(
@@ -174,12 +251,8 @@ class z1Dam:
             )
 
         if _looks_ambiguous(request_text):
-            return DamResult(
-                DamDecision.STOP_FOR_CLARITY,
-                "Instruction contains ambiguous action language without a clear target/scope.",
-                ledger_status=ledger_check.status,
-                required_next_step="Ask Adam to choose target, scope, and action before executing.",
-            )
+            signals.append(SiloSignal("dam.ambiguity", "STOP_FOR_CLARITY", 0.85,
+                                       "Ambiguous action language without clear target/scope."))
 
         guard_result = self.action_guard.classify(
             request_text,
@@ -194,52 +267,55 @@ class z1Dam:
                     context={"matched_terms": guard_result.matched_terms},
                 )
             except Exception:
-                # Never let logging failure become permission to execute.
                 pass
-            return DamResult(
-                DamDecision.BLOCK_DESTRUCTIVE,
-                guard_result.reason,
-                action_guard=guard_result,
-                ledger_status=ledger_check.status,
-                required_next_step="Require explicit confirmation or provide a reversible draft/checklist only.",
-            )
-        if guard_result.decision == ActionDecision.STOP_FOR_CLARITY:
-            return DamResult(
-                DamDecision.STOP_FOR_CLARITY,
-                guard_result.reason,
-                action_guard=guard_result,
-                ledger_status=ledger_check.status,
-                required_next_step="Inspect artifact or ask for target/scope clarification.",
-            )
+            signals.append(SiloSignal("dam.action_guard", "BLOCK", 0.95, guard_result.reason))
+        elif guard_result.decision == ActionDecision.STOP_FOR_CLARITY:
+            signals.append(SiloSignal("dam.action_guard", "STOP_FOR_CLARITY", 0.8, guard_result.reason))
+        else:
+            signals.append(SiloSignal("dam.action_guard", "ALLOW", 0.7, "Action guard found no restricted pattern."))
 
+        reservoir_result = None
         if _mentions_any(request_text, RESERVOIR_TERMS):
             reservoir_result = self.reservoir_gate.authorize(
                 request_text,
                 requested_target=requested_reservoir_target,
             )
             if reservoir_result.decision != ReservoirDecision.ALLOW:
-                return DamResult(
-                    DamDecision.RESERVOIR_AUTH_REQUIRED,
-                    reservoir_result.reason,
-                    action_guard=guard_result,
-                    reservoir_gate=reservoir_result,
-                    ledger_status=ledger_check.status,
-                    required_next_step="Use OPEN_RESERVOIR: [specific file/folder/request] if cold storage should be accessed.",
-                )
-            return DamResult(
-                DamDecision.ALLOW,
-                "Request allowed with scoped reservoir authorization. Label retrieved content as retrieved, not current truth.",
-                action_guard=guard_result,
-                reservoir_gate=reservoir_result,
-                ledger_status=ledger_check.status,
-            )
+                signals.append(SiloSignal("dam.reservoir", "BLOCK", 0.99, reservoir_result.reason))
+            else:
+                signals.append(SiloSignal("dam.reservoir", "ALLOW", 0.9, "Scoped reservoir authorization present."))
+
+        resolved, arb_note = arbitrate_signals(signals)
+
+        decision_map = {
+            "ALLOW": DamDecision.ALLOW,
+            "BLOCK": DamDecision.BLOCK_DESTRUCTIVE,
+            "STOP_FOR_CLARITY": DamDecision.STOP_FOR_CLARITY,
+            "UNCLASSIFIED": DamDecision.STOP_FOR_CLARITY,
+        }
+
+        required_next = None
+        if resolved == "BLOCK":
+            required_next = "Require explicit confirmation or provide a reversible draft/checklist only."
+        elif resolved == "STOP_FOR_CLARITY":
+            required_next = "Ask for target/scope clarification, or flag as unclassified for routing review."
+        elif resolved == "UNCLASSIFIED":
+            required_next = "No silo recognized this request. Log as a gap for routing review."
+
+        assumptions = []
+        if ledger_check.status != LedgerStatus.OK:
+            assumptions.append("Ledger unavailable; proceeding with current-session context only.")
 
         return DamResult(
-            DamDecision.ALLOW,
-            "Request allowed by dam inspection.",
+            decision_map[resolved],
+            arb_note,
             action_guard=guard_result,
+            reservoir_gate=reservoir_result,
             ledger_status=ledger_check.status,
-            assumptions=[] if ledger_check.status == LedgerStatus.OK else ["Ledger unavailable; proceeding with current-session context only."],
+            assumptions=assumptions,
+            required_next_step=required_next,
+            silo_signals=signals,
+            arbitration_note=arb_note,
         )
 
     def build_runtime_preamble(self) -> str:
